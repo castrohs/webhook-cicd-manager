@@ -1,0 +1,19 @@
+{
+    "api.exemplo.com.br": {
+        "repository": "meu-repositorio-api",
+        "path": "/var/www/api.exemplo.com.br",
+        "branch": "main",
+        "key": "id_deploy_api",
+        "type": "nodejs_bot",
+        "pm2_name": "processo_api",
+        "has_database": true
+    },
+    "site.exemplo.com.br": {
+        "repository": "meu-repositorio-site",
+        "path": "/var/www/site.exemplo.com.br",
+        "branch": "master",
+        "key": "id_deploy_site",
+        "type": "auto",
+        "has_database": false
+    }
+}
