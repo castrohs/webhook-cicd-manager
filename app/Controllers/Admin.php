@@ -35,6 +35,9 @@ class Admin extends BaseController
         $cheatsheetFile = WRITEPATH . 'cheatsheet.html';
         $cheatsheetHtml = file_exists($cheatsheetFile) ? file_get_contents($cheatsheetFile) : '';
 
+        $securityAudit = \App\Libraries\SecurityAudit::run();
+        $currentUser = $this->findCurrentUserRecord();
+
         return view('admin/dashboard', [
             'logs' => $logs,
             'selectedLog' => $selectedLog,
@@ -42,8 +45,156 @@ class Admin extends BaseController
             'sites' => $sites,
             'projects_json' => $projectsJson,
             'cheatsheet_html' => $cheatsheetHtml,
+            'securityAudit' => $securityAudit,
+            'currentUser2faEnabled' => !empty($currentUser['two_factor_enabled']) && !empty($currentUser['totp_secret']),
+            'currentUser2faIssuer' => $currentUser['totp_issuer'] ?? 'DeployHub',
             'message' => session()->getFlashdata('message')
         ]);
+    }
+
+    public function securityAudit()
+    {
+        return $this->response->setJSON(\App\Libraries\SecurityAudit::run());
+    }
+
+    public function prepare2fa()
+    {
+        $username = (string) session()->get('username');
+        $issuer = trim((string) ($this->request->getPost('issuer') ?? 'DeployHub'));
+        if ($issuer === '') {
+            $issuer = 'DeployHub';
+        }
+        $issuer = mb_substr($issuer, 0, 40);
+
+        $secret = \App\Libraries\Totp::generateSecret();
+        session()->set([
+            'pending_totp_secret' => $secret,
+            'pending_totp_issuer' => $issuer,
+        ]);
+
+        return $this->response->setJSON([
+            'secret' => $secret,
+            'issuer' => $issuer,
+            'uri'    => \App\Libraries\Totp::getProvisioningUri($secret, $username, $issuer),
+        ]);
+    }
+
+    public function enable2fa()
+    {
+        $secret = (string) session()->get('pending_totp_secret');
+        $issuer = (string) (session()->get('pending_totp_issuer') ?: 'DeployHub');
+        $code = (string) ($this->request->getPost('code') ?? '');
+
+        if ($secret === '') {
+            return $this->response->setStatusCode(400)->setJSON(['ok' => false, 'error' => 'Gere a chave 2FA primeiro.']);
+        }
+
+        if (!\App\Libraries\Totp::verify($secret, $code)) {
+            return $this->response->setStatusCode(422)->setJSON(['ok' => false, 'error' => 'Código de 6 dígitos inválido. Verifique o relógio do servidor/app.']);
+        }
+
+        $recoveryCodes = \App\Libraries\Totp::generateRecoveryCodes(6);
+        $recoveryHashes = array_map(
+            static fn (string $c): string => password_hash($c, PASSWORD_DEFAULT),
+            $recoveryCodes
+        );
+
+        $username = (string) session()->get('username');
+        if (!$this->updateUserRecord($username, [
+            'totp_secret'           => $secret,
+            'totp_issuer'           => $issuer,
+            'two_factor_enabled'    => true,
+            'recovery_codes_hashes' => $recoveryHashes,
+        ])) {
+            return $this->response->setStatusCode(500)->setJSON(['ok' => false, 'error' => 'Não foi possível salvar em writable/users.json.']);
+        }
+
+        session()->remove(['pending_totp_secret', 'pending_totp_issuer']);
+        return $this->response->setJSON([
+            'ok'             => true,
+            'issuer'         => $issuer,
+            'recovery_codes' => $recoveryCodes,
+        ]);
+    }
+
+    public function disable2fa()
+    {
+        $username = (string) session()->get('username');
+        $user = $this->findCurrentUserRecord();
+        $code = (string) ($this->request->getPost('code') ?? '');
+
+        $totpOk = !empty($user['totp_secret']) && \App\Libraries\Totp::verify((string) $user['totp_secret'], $code);
+        $recoveryOk = false;
+        if (!$totpOk && is_array($user['recovery_codes_hashes'] ?? null)) {
+            $res = \App\Libraries\Totp::consumeRecoveryCode($code, $user['recovery_codes_hashes']);
+            $recoveryOk = $res['matched'];
+        }
+
+        if (!$totpOk && !$recoveryOk) {
+            return $this->response->setStatusCode(422)->setJSON(['ok' => false, 'error' => 'Informe um código TOTP (6 dígitos) ou código de emergência válido.']);
+        }
+
+        $this->updateUserRecord($username, [
+            'totp_secret'           => null,
+            'totp_issuer'           => null,
+            'two_factor_enabled'    => false,
+            'recovery_codes_hashes' => null,
+        ]);
+
+        return $this->response->setJSON(['ok' => true]);
+    }
+
+    private function findCurrentUserRecord(): ?array
+    {
+        $username = (string) session()->get('username');
+        $usersFile = WRITEPATH . 'users.json';
+        if ($username === '' || !file_exists($usersFile)) {
+            return null;
+        }
+        $users = json_decode((string) file_get_contents($usersFile), true);
+        if (!is_array($users)) {
+            return null;
+        }
+        foreach ($users as $user) {
+            if (($user['username'] ?? '') === $username) {
+                return $user;
+            }
+        }
+        return null;
+    }
+
+    private function updateUserRecord(string $username, array $fields): bool
+    {
+        $usersFile = WRITEPATH . 'users.json';
+        if ($username === '' || !file_exists($usersFile)) {
+            return false;
+        }
+        $users = json_decode((string) file_get_contents($usersFile), true);
+        if (!is_array($users)) {
+            return false;
+        }
+
+        $updated = false;
+        foreach ($users as &$user) {
+            if (($user['username'] ?? '') === $username) {
+                foreach ($fields as $k => $v) {
+                    if ($v === null) {
+                        unset($user[$k]);
+                    } else {
+                        $user[$k] = $v;
+                    }
+                }
+                $updated = true;
+                break;
+            }
+        }
+        unset($user);
+
+        if (!$updated) {
+            return false;
+        }
+
+        return file_put_contents($usersFile, json_encode($users, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)) !== false;
     }
 
     public function runAction()
@@ -104,12 +255,11 @@ class Admin extends BaseController
             $tmpNginx = "/tmp/nginx_$dom";
             file_put_contents($tmpNginx, $nginxConfig);
 
-            $certbotEmail = env('CERTBOT_EMAIL') ?: ('admin@' . $dom);
             $cmd = "sudo mkdir -p $fullPath/public && sudo chown -R www-data:www-data $fullPath && ";
             $cmd .= "sudo cp $tmpNginx /etc/nginx/sites-available/$dom && ";
             $cmd .= "sudo ln -sf /etc/nginx/sites-available/$dom /etc/nginx/sites-enabled/ && ";
             $cmd .= "sudo nginx -t && sudo systemctl reload nginx && ";
-            $cmd .= "sudo certbot --nginx -d $dom -d www.$dom --non-interactive --agree-tos -m $certbotEmail --redirect";
+            $cmd .= "sudo certbot --nginx -d $dom -d www.$dom --non-interactive --agree-tos -m \$certbotEmail --redirect";
 
             exec($cmd . " 2>&1", $output, $result);
 
@@ -157,8 +307,7 @@ class Admin extends BaseController
             $sshUser = $this->request->getPost('ssh_user');
             $proxyPort = $this->request->getPost('proxy_port');
             $pm2Name = $this->request->getPost('pm2_name');
-
-            $certbotEmail = env('CERTBOT_EMAIL') ?: ('admin@' . $dom);
+            $backupDatabase = $this->request->getPost('backup_database') === '1';
 
             // 1. Criar Host
             if (!empty($proxyPort)) {
@@ -175,7 +324,7 @@ class Admin extends BaseController
         proxy_cache_bypass \$http_upgrade;
     }
 }";
-                $certbotCmd = "sudo certbot --nginx -d $dom --non-interactive --agree-tos -m $certbotEmail --redirect";
+                $certbotCmd = "sudo certbot --nginx -d $dom --non-interactive --agree-tos -m \$certbotEmail --redirect";
             } else {
                 $isSubdomain = substr_count($dom, '.') >= 2;
                 $serverNames = $isSubdomain ? $dom : "$dom www.$dom";
@@ -193,7 +342,7 @@ class Admin extends BaseController
         fastcgi_param SCRIPT_FILENAME \$realpath_root\$fastcgi_script_name;
     }
 }";
-                $certbotCmd = "sudo certbot --nginx $certbotDomains --non-interactive --agree-tos -m $certbotEmail --redirect";
+                $certbotCmd = "sudo certbot --nginx $certbotDomains --non-interactive --agree-tos -m \$certbotEmail --redirect";
             }
             
             $tmpNginx = "/tmp/nginx_$dom";
@@ -209,8 +358,7 @@ class Admin extends BaseController
 
             if ($result === 0) {
                 // 2. Criar Chave SSH
-                $sanitizedDom = preg_replace('/[^a-zA-Z0-9_-]/', '_', $dom);
-                $keyName = "id_deploy_" . $sanitizedDom;
+                $keyName = "id_deploy_" . str_replace('.com.br', '', $dom);
                 $keyPath = "/var/www/.ssh/$keyName";
                 
                 $sshCmd = "sudo mkdir -p /var/www/.ssh && sudo chown -R www-data:www-data /var/www/.ssh && ssh-keygen -t ed25519 -f $keyPath -q -N \"\"";
@@ -233,7 +381,8 @@ class Admin extends BaseController
                     'path' => $fullPath,
                     'branch' => $branch,
                     'key' => $keyName,
-                    'type' => $type
+                    'type' => $type,
+                    'backup_database' => $backupDatabase,
                 ];
                 
                 if (!empty($pm2Name)) {
@@ -273,8 +422,7 @@ class Admin extends BaseController
 
         if ($action === 'install_ssl' && !empty($domain)) {
             $dom = basename($domain);
-            $certbotEmail = env('CERTBOT_EMAIL') ?: ('admin@' . $dom);
-            $cmd = "sudo certbot --nginx -d $dom -d www.$dom --non-interactive --agree-tos -m $certbotEmail --redirect";
+            $cmd = "sudo certbot --nginx -d $dom -d www.$dom --non-interactive --agree-tos -m \$certbotEmail --redirect";
             exec($cmd . " 2>&1", $output, $result);
 
             if ($result === 0) {
