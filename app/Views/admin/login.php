@@ -29,6 +29,11 @@
                 <label class="block text-gray-400 text-sm font-bold mb-2">Senha</label>
                 <input type="password" name="password" required class="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white focus:border-blue-500 outline-none transition-all">
             </div>
+            <div>
+                <label class="block text-gray-400 text-sm font-bold mb-2">Código 2FA ou Emergência <span class="text-xs font-normal text-gray-500">(se ativo)</span></label>
+                <input type="text" name="totp_code" autocomplete="one-time-code" maxlength="16" placeholder="000000 ou XXXX-XXXX"
+                    class="w-full bg-gray-900 border border-gray-700 rounded-lg p-3 text-white font-mono tracking-widest focus:border-blue-500 outline-none transition-all">
+            </div>
             <button type="submit" class="w-full bg-blue-600 hover:bg-blue-500 p-3 rounded-lg text-white font-bold transition-all shadow-lg shadow-blue-900/20">Entrar</button>
         </form>
     </div>
