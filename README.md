@@ -6,6 +6,8 @@ Built with **PHP (CodeIgniter 4)**, **Bash**, and **Tailwind CSS**, DeployHub au
 
 ![DeployHub Dashboard](docs/screenshots/dashboard.png)
 
+![Security & Hardening Panel](docs/screenshots/security-panel.jpg)
+
 ---
 
 ## 🌟 Key Features
@@ -20,7 +22,9 @@ Built with **PHP (CodeIgniter 4)**, **Bash**, and **Tailwind CSS**, DeployHub au
 - ⚙️ **Visual `projects.json` Configuration**: Manage, edit, and map repositories, branches, deployment targets, and SSH keys directly from the browser.
 - 🕹️ **Manual Trigger & Rollbacks**: Trigger builds on demand with a single click from the administrative control panel.
 - 📜 **Real-time Deployment Logs**: Inspect execution outputs and debugging details in `writable/logs/deploy/` tracked with `set -e` and `set -x` shell traps.
-- 🔐 **Secure Authentication**: Protected sessions, Bcrypt password hashing, and in-dashboard password rotation.
+- 🔐 **Secure Authentication & Native 2FA (TOTP)**: Protected sessions, Bcrypt password hashing, and zero-dependency RFC 6238 TOTP two-factor authentication with local QR code generation, customizable service name, and single-use emergency recovery codes.
+- 🛡️ **Security Adherence & Progressive Hardening Panel**: Real-time 5-layer infrastructure audit (`deployer` user isolation, `/opt/deployhub/deploy.sh` integrity, 2FA status, webhook HMAC/branch validation, and PHP-FPM reload / backup directory permissions) with copy-and-paste remediation commands.
+- 🗄️ **Per-Project Database Backups**: Optional `backup_database` flag in `projects.json` (disabled by default) using `MYSQL_PWD` and `set +x` so credentials never leak into deployment logs.
 
 ---
 
@@ -42,11 +46,15 @@ Built with **PHP (CodeIgniter 4)**, **Bash**, and **Tailwind CSS**, DeployHub au
 │   │   ├── Auth.php         # Authentication and session handling
 │   │   └── Webhook.php      # GitHub Webhook listener with HMAC verification
 │   ├── Libraries/
-│   │   └── Deployer.php     # Multi-stack shell script generation and deployment engine
+│   │   ├── Deployer.php       # Multi-stack shell script generation and deployment engine
+│   │   ├── SecurityAudit.php  # 5-layer server security & hardening healthcheck
+│   │   └── Totp.php           # Native RFC 6238 TOTP 2FA & recovery code helper
 │   └── Views/
-│       ├── admin/           # Dashboard, Nginx manager, and project views
-│       └── auth/            # Login interface
-├── public/                  # Web server document root (index.php, static assets)
+│       └── admin/             # Dashboard, security panel, login & project views
+├── public/                    # Web server document root (index.php, local QR code JS)
+├── scripts/
+│   └── deploy-wrapper.sh      # Hardened input-validating wrapper for /opt/deployhub/deploy.sh
+├── tests/unit/                # PHPUnit unit tests (SecurityAudit, Totp, Deployer)
 ├── writable/
 │   ├── logs/deploy/         # Real-time deployment logs per project and branch
 │   ├── projects.json        # Domain mapping, branches, and deploy configurations
@@ -79,6 +87,7 @@ Open `.env` and set your configuration:
 - `app.baseURL = 'https://your-domain.com/'`
 - `WEBHOOK_SECRET = 'your_secret_github_webhook_token'`
 - `CERTBOT_EMAIL = 'admin@your-domain.com'`
+- `DEPLOY_MYSQL_BACKUP_ENABLED = true` (Set to `false` to disable automatic database backups before migrations)
 
 ### 3. Initialize Configuration Files
 
@@ -94,13 +103,28 @@ cp writable/servers.json.example writable/servers.json
 > - **Username**: `admin`
 > - **Password**: `admin123` *(Be sure to change this immediately after your first login via the Profile menu)*
 
-### 4. Directory Permissions
+### 4. Directory Permissions & System Requirements
 
 Ensure the `writable/` folder is writable by the web server user (e.g., `www-data`):
 
 ```bash
 chmod -R 775 writable
 sudo chown -R $USER:www-data writable
+```
+
+**System Requirements for Deployments:**
+If you plan to use automated MySQL backups and seamless PHP-FPM reloads during deployments, ensure the web server user has the correct system privileges:
+
+1. **MySQL Backup Directory**:
+```bash
+sudo mkdir -p /var/www/backups
+sudo chown -R www-data:www-data /var/www/backups
+```
+
+2. **PHP-FPM Reload Permission (Sudoers)**:
+Allow the web user to reload PHP-FPM without a password prompt. Use `sudo visudo` or run the following command as root to create the rule:
+```bash
+echo "www-data ALL=(ALL) NOPASSWD: /bin/systemctl reload php8.4-fpm" | sudo tee /etc/sudoers.d/deploy-php-fpm
 ```
 
 ---
